@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Penjadwal WA</string>
+    <string name="accessibility_desc">Dipakai untuk menekan tombol Kirim di WhatsApp pada waktu yang sudah Anda jadwalkan. Aplikasi hanya bekerja di WhatsApp dan tidak membaca isi chat.</string>
+</resources>
