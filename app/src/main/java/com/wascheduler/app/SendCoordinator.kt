@@ -9,35 +9,49 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/**
- * Mengantre dan menjalankan pengiriman satu per satu.
- * Semua dipanggil dari main thread.
- */
 object SendCoordinator {
+
+    private class QueueItem(
+        val scheduleId: String,
+        val recipient: Recipient,
+        val batchKey: String
+    )
+
+    private class BatchProgress(
+        val total: Int,
+        var done: Int = 0,
+        var success: Int = 0,
+        var lastError: String = ""
+    )
 
     class Job(
         val scheduleId: String,
+        val batchKey: String,
         val isGroup: Boolean,
         val target: String,
         val pkg: String
     ) {
-        var chosen = false      // grup sudah dipilih di daftar
-        var clicks = 0          // berapa kali tombol kirim ditekan
+        var chosen = false
+        var clicks = 0
         var lastClick = 0L
-        var typedAt = 0L        // kapan nama grup diketik di kolom cari
+        var typedAt = 0L
+        var lastPickClick = 0L
+        var pickAttempts = 0
     }
 
     private const val TIMEOUT_MS = 60_000L
-
     private val handler = Handler(Looper.getMainLooper())
-    private val queue = ArrayDeque<String>()
+    private val queue = ArrayDeque<QueueItem>()
+    private val batches = mutableMapOf<String, BatchProgress>()
     private var appCtx: Context? = null
 
     @Volatile
     var current: Job? = null
         private set
 
-    private val timeout = Runnable { finish(false, "Waktu habis, tombol kirim tidak ditemukan") }
+    private val timeout = Runnable {
+        finish(false, "Waktu habis, tombol kirim tidak ditemukan")
+    }
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -49,45 +63,85 @@ object SendCoordinator {
 
     fun enqueue(ctx: Context, id: String) {
         appCtx = ctx.applicationContext
-        queue.addLast(id)
+        val s = Store.get(ctx, id) ?: return
+        val list = s.effectiveRecipients()
+        if (list.isEmpty()) {
+            record(ctx, s, false, "Tidak ada penerima")
+            return
+        }
+        val batchKey = "${id}_${System.currentTimeMillis()}"
+        batches[batchKey] = BatchProgress(total = list.size)
+        list.forEach { recipient ->
+            queue.addLast(QueueItem(id, recipient, batchKey))
+        }
         if (current == null) handler.post { startNext() }
     }
 
     private fun startNext() {
         if (current != null) return
         val ctx = appCtx ?: return
-        val id = queue.removeFirstOrNull() ?: return
-        val s = Store.get(ctx, id)
+        val item = queue.removeFirstOrNull() ?: return
+        val s = Store.get(ctx, item.scheduleId)
         if (s == null) {
             startNext()
             return
         }
-
         val pkg = WaUtil.installedPackage(ctx)
         if (pkg == null) {
             record(ctx, s, false, "WhatsApp tidak terpasang")
+            clearBatch(item.batchKey)
             startNext()
             return
         }
         val service = WaAccessibilityService.instance
         if (service == null) {
             record(ctx, s, false, "Layanan aksesibilitas belum aktif")
+            clearBatch(item.batchKey)
             startNext()
             return
         }
 
-        current = Job(s.id, s.isGroup, s.target, pkg)
-        WaUtil.wakeScreen(ctx)
+        // Terapkan pilihan WhatsApp Utama (0) atau Clone (1) dari jadwal ini
+        val waIndex = if (s.whatsappTarget == Schedule.WHATSAPP_CLONE) 1 else 0
+        WaAccessibilityService.targetWaIndex = waIndex
+        ctx.getSharedPreferences(WaAccessibilityService.PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putInt(WaAccessibilityService.KEY_TARGET_WA_INDEX, waIndex)
+            .apply()
 
+        // Jika penerima punya nomor HP (belum tersimpan di kontak), kirim langsung ke nomor;
+        // selain itu (kontak tersimpan atau grup), cari berdasarkan nama di daftar kirim WA.
+        val useDirectPhone = item.recipient.identifier.isNotBlank() && s.attachments.isEmpty()
+        val isSearchMode = !useDirectPhone
+        val jobTarget = if (useDirectPhone) item.recipient.identifier else item.recipient.name
+
+        val singleSchedule = s.copy(
+            isGroup = isSearchMode,
+            target = jobTarget
+        )
+
+        current = Job(
+            scheduleId = s.id,
+            batchKey = item.batchKey,
+            isGroup = isSearchMode,
+            target = jobTarget,
+            pkg = pkg
+        )
+
+        WaUtil.wakeScreen(ctx)
         try {
-            service.startActivity(WaUtil.buildIntent(ctx, s, pkg))
+            service.startActivity(WaUtil.buildIntent(ctx, singleSchedule, pkg))
         } catch (e: Exception) {
             finish(false, "Gagal membuka WhatsApp: ${e.message}")
             return
         }
-
         handler.postDelayed(timeout, TIMEOUT_MS)
         handler.postDelayed(ticker, 1500)
+    }
+
+    private fun clearBatch(batchKey: String) {
+        batches.remove(batchKey)
+        queue.removeAll { it.batchKey == batchKey }
     }
 
     fun finish(ok: Boolean, msg: String) {
@@ -97,22 +151,46 @@ object SendCoordinator {
         handler.removeCallbacks(ticker)
 
         val ctx = appCtx
-        if (ctx != null) {
-            Store.get(ctx, job.scheduleId)?.let { record(ctx, it, ok, msg) }
-            Toast.makeText(
-                ctx,
-                if (ok) "Pesan terkirim" else "Gagal mengirim: $msg",
-                Toast.LENGTH_LONG
-            ).show()
+        val progress = batches[job.batchKey]
+        if (progress != null) {
+            progress.done++
+            if (ok) progress.success++ else progress.lastError = "${job.target}: $msg"
         }
 
-        WaAccessibilityService.instance?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
-        handler.postDelayed({ startNext() }, 2000)
+        if (ctx != null && (progress == null || progress.done >= progress.total)) {
+            batches.remove(job.batchKey)
+            Store.get(ctx, job.scheduleId)?.let { s ->
+                val allOk = progress == null || progress.success == progress.total
+                val summary = if (progress == null || progress.total <= 1) {
+                    if (ok) "" else msg
+                } else if (allOk) {
+                    "(${progress.success}/${progress.total} penerima)"
+                } else {
+                    "${progress.success}/${progress.total} terkirim (${progress.lastError})"
+                }
+                record(ctx, s, allOk, summary)
+            }
+            val toastText = if (progress == null || progress.total <= 1) {
+                if (ok) "Pesan terkirim ke ${job.target}" else "Gagal ke ${job.target}: $msg"
+            } else {
+                "Selesai: ${progress.success}/${progress.total} penerima terkirim"
+            }
+            Toast.makeText(ctx, toastText, Toast.LENGTH_LONG).show()
+        }
+
+        WaAccessibilityService.instance?.performGlobalAction(
+            AccessibilityService.GLOBAL_ACTION_HOME
+        )
+        handler.postDelayed({ startNext() }, 2500)
     }
 
     private fun record(ctx: Context, s: Schedule, ok: Boolean, msg: String) {
         val t = SimpleDateFormat("dd MMM HH:mm", Locale("id", "ID")).format(Date())
-        s.lastStatus = if (ok) "$t - Terkirim" else "$t - Gagal: $msg"
+        s.lastStatus = when {
+            ok && msg.isNotBlank() -> "$t - Terkirim $msg"
+            ok -> "$t - Terkirim"
+            else -> "$t - Gagal: $msg"
+        }
         Store.upsert(ctx, s)
     }
 }
