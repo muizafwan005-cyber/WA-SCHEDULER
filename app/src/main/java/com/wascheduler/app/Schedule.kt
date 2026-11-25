@@ -20,8 +20,14 @@ data class Schedule(
     var enabled: Boolean = true,
     var nextRun: Long = 0L,
     var lastStatus: String = "",
-    var whatsappTarget: String = WHATSAPP_MAIN
+    var whatsappTarget: String = WHATSAPP_MAIN,
+
+    // Identitas penerima dari WhatsApp Recipient Picker
+    var recipientSelected: Boolean = false,
+    var recipientName: String = "",
+    var recipientIdentifier: String = ""
 ) {
+
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id)
         put("name", name)
@@ -39,6 +45,11 @@ data class Schedule(
         put("nextRun", nextRun)
         put("lastStatus", lastStatus)
         put("whatsappTarget", whatsappTarget)
+
+        // Simpan identitas penerima
+        put("recipientSelected", recipientSelected)
+        put("recipientName", recipientName)
+        put("recipientIdentifier", recipientIdentifier)
     }
 
     companion object {
@@ -53,6 +64,7 @@ data class Schedule(
         fun fromJson(o: JSONObject): Schedule {
             val att = mutableListOf<String>()
             val aj = o.optJSONArray("attachments")
+
             if (aj != null) {
                 for (i in 0 until aj.length()) {
                     att.add(aj.getString(i))
@@ -61,6 +73,7 @@ data class Schedule(
 
             val days = mutableListOf<Int>()
             val dj = o.optJSONArray("daysOfWeek")
+
             if (dj != null) {
                 for (i in 0 until dj.length()) {
                     days.add(dj.getInt(i))
@@ -83,13 +96,24 @@ data class Schedule(
                 enabled = o.optBoolean("enabled", true),
                 nextRun = o.optLong("nextRun"),
                 lastStatus = o.optString("lastStatus"),
+
                 whatsappTarget = o.optString(
                     "whatsappTarget",
                     WHATSAPP_MAIN
                 ).let {
-                    if (it == WHATSAPP_CLONE) WHATSAPP_CLONE
-                    else WHATSAPP_MAIN
-                }
+                    if (it == WHATSAPP_CLONE) {
+                        WHATSAPP_CLONE
+                    } else {
+                        WHATSAPP_MAIN
+                    }
+                },
+
+                recipientSelected = o.optBoolean(
+                    "recipientSelected",
+                    false
+                ),
+                recipientName = o.optString("recipientName"),
+                recipientIdentifier = o.optString("recipientIdentifier")
             )
         }
     }
