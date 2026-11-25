@@ -17,16 +17,22 @@ class WaAccessibilityService : AccessibilityService() {
         @Volatile
         var selectingRecipient = false
 
+        @Volatile
+        var recipientSawChatList = false
+
         const val PREFS = "wa_scheduler"
         const val KEY_PENDING_NAME = "pending_recipient_name"
         const val KEY_PENDING_PACKAGE = "pending_recipient_package"
+        const val KEY_PENDING_IDENTIFIER = "pending_recipient_identifier"
 
         fun beginRecipientSelection() {
+            recipientSawChatList = false
             selectingRecipient = true
         }
 
         fun cancelRecipientSelection() {
             selectingRecipient = false
+            recipientSawChatList = false
         }
     }
 
@@ -38,12 +44,14 @@ class WaAccessibilityService : AccessibilityService() {
     override fun onUnbind(intent: Intent?): Boolean {
         instance = null
         selectingRecipient = false
+        recipientSawChatList = false
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
         instance = null
         selectingRecipient = false
+        recipientSawChatList = false
         super.onDestroy()
     }
 
@@ -76,34 +84,63 @@ class WaAccessibilityService : AccessibilityService() {
             pkg != "com.whatsapp.w4b"
         ) return
 
-        // Harus berada di halaman percakapan,
-        // bukan hanya halaman daftar chat.
+        // Tandai bahwa halaman selain percakapan terlihat.
+        // Pengguna harus melewati daftar chat sebelum
+        // percakapan dipilih.
+        if (!hasChatComposer(root)) {
+            recipientSawChatList = true
+            return
+        }
+
+        // Jangan langsung memilih chat lama yang terbuka
+        // ketika WhatsApp baru diluncurkan.
+        if (!recipientSawChatList) return
+
         val title = findConversationTitle(root) ?: return
-
-        if (!hasChatComposer(root)) return
-
         val name = title.trim()
 
         if (name.isBlank()) return
         if (name.equals("WhatsApp", true)) return
         if (name.equals("WhatsApp Business", true)) return
 
+        val identifier = extractPhoneNumberFromTitle(name)
+
         getSharedPreferences(PREFS, MODE_PRIVATE)
             .edit()
             .putString(KEY_PENDING_NAME, name)
             .putString(KEY_PENDING_PACKAGE, pkg)
+            .putString(KEY_PENDING_IDENTIFIER, identifier)
             .apply()
 
         selectingRecipient = false
+        recipientSawChatList = false
 
-        // Beritahu EditActivity jika sedang aktif.
         sendBroadcast(
             Intent("com.wascheduler.app.RECIPIENT_SELECTED").apply {
                 setPackage(packageName)
                 putExtra("recipient_name", name)
+                putExtra("recipient_identifier", identifier)
                 putExtra("whatsapp_package", pkg)
             }
         )
+    }
+
+    private fun extractPhoneNumberFromTitle(title: String): String {
+        val value = title.trim()
+
+        if (!Regex("""^\+?[0-9][0-9\s().-]{6,}[0-9]$""")
+                .matches(value)
+        ) {
+            return ""
+        }
+
+        val digits = value.filter { it.isDigit() }
+
+        return if (digits.length in 8..15) {
+            digits
+        } else {
+            ""
+        }
     }
 
     private fun hasChatComposer(
@@ -150,6 +187,7 @@ class WaAccessibilityService : AccessibilityService() {
         // Cadangan jika versi WhatsApp menggunakan ID berbeda.
         val titleNode = findNode(root) {
             val id = it.viewIdResourceName ?: ""
+
             id.endsWith(":id/title") &&
                 !it.text.isNullOrBlank()
         }
@@ -159,6 +197,7 @@ class WaAccessibilityService : AccessibilityService() {
 
     // =====================================================
     // PENGIRIMAN PESAN LAMA
+    // Bagian ini dipertahankan dari kode asli.
     // =====================================================
 
     fun step() {
@@ -179,6 +218,7 @@ class WaAccessibilityService : AccessibilityService() {
                     job.lastClick = now
                 }
             }
+
             return
         }
 
@@ -186,6 +226,7 @@ class WaAccessibilityService : AccessibilityService() {
             if (now - job.lastClick > 3000) {
                 SendCoordinator.finish(true, "")
             }
+
             return
         }
 
@@ -230,22 +271,27 @@ class WaAccessibilityService : AccessibilityService() {
         if (edit != null) {
             if (edit.text?.toString() != name) {
                 val args = Bundle()
+
                 args.putCharSequence(
                     AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
                     name
                 )
+
                 edit.performAction(
                     AccessibilityNodeInfo.ACTION_SET_TEXT,
                     args
                 )
+
                 job.typedAt = now
             }
+
             return
         }
 
         val search = findNode(root) {
             val d = it.contentDescription
                 ?.toString()?.trim()?.lowercase()
+
             d == "search" || d == "cari"
         }
 
@@ -266,6 +312,7 @@ class WaAccessibilityService : AccessibilityService() {
         return findNode(root) {
             val d = it.contentDescription
                 ?.toString()?.trim()?.lowercase()
+
             val t = it.text?.toString()?.trim()?.lowercase()
 
             d == "send" || d == "kirim" ||
@@ -299,6 +346,7 @@ class WaAccessibilityService : AccessibilityService() {
                     AccessibilityNodeInfo.ACTION_CLICK
                 )
             }
+
             current = current.parent
         }
 
