@@ -17,22 +17,14 @@ class WaAccessibilityService : AccessibilityService() {
         @Volatile
         var selectingRecipient = false
 
-        const val ACTION_RECIPIENT_SELECTED =
-            "com.wascheduler.app.RECIPIENT_SELECTED"
+        const val PREFS = "wa_scheduler"
+        const val KEY_PENDING_NAME = "pending_recipient_name"
+        const val KEY_PENDING_PACKAGE = "pending_recipient_package"
 
-        const val EXTRA_RECIPIENT_NAME = "recipient_name"
-        const val EXTRA_WHATSAPP_PACKAGE = "whatsapp_package"
-
-        /**
-         * Dipanggil EditActivity sebelum membuka WhatsApp.
-         */
         fun beginRecipientSelection() {
             selectingRecipient = true
         }
 
-        /**
-         * Membatalkan proses pemilihan penerima.
-         */
         fun cancelRecipientSelection() {
             selectingRecipient = false
         }
@@ -60,22 +52,20 @@ class WaAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
 
-        // Mode pemilihan penerima
         if (selectingRecipient) {
             captureRecipient()
             return
         }
 
-        // Mode pengiriman terjadwal yang lama
         if (SendCoordinator.current != null) {
             step()
         }
     }
 
-    /**
-     * Membaca nama chat yang sedang dibuka.
-     * Hanya mengambil nama ketika halaman percakapan terdeteksi.
-     */
+    // =====================================================
+    // RECIPIENT PICKER
+    // =====================================================
+
     private fun captureRecipient() {
         if (!selectingRecipient) return
 
@@ -86,65 +76,57 @@ class WaAccessibilityService : AccessibilityService() {
             pkg != "com.whatsapp.w4b"
         ) return
 
-        // Pastikan kita berada di halaman percakapan,
-        // bukan halaman pencarian atau daftar chat.
+        // Harus berada di halaman percakapan,
+        // bukan hanya halaman daftar chat.
+        val title = findConversationTitle(root) ?: return
+
         if (!hasChatComposer(root)) return
 
-        val recipientName = findConversationTitle(root)
-            ?.trim()
-            ?.takeIf { it.isNotBlank() }
-            ?: return
+        val name = title.trim()
 
-        // Hindari menyimpan judul umum aplikasi.
-        if (recipientName.equals("WhatsApp", true)) return
-        if (recipientName.equals("WhatsApp Business", true)) return
+        if (name.isBlank()) return
+        if (name.equals("WhatsApp", true)) return
+        if (name.equals("WhatsApp Business", true)) return
 
-        // Simpan hasil agar EditActivity bisa mengambilnya
-        // meskipun Activity sedang berada di background.
-        val prefs = getSharedPreferences(
-            "wa_scheduler",
-            MODE_PRIVATE
-        )
-
-        prefs.edit()
-            .putString("last_selected_recipient", recipientName)
-            .putString("last_selected_whatsapp_package", pkg)
+        getSharedPreferences(PREFS, MODE_PRIVATE)
+            .edit()
+            .putString(KEY_PENDING_NAME, name)
+            .putString(KEY_PENDING_PACKAGE, pkg)
             .apply()
 
         selectingRecipient = false
 
-        // Kirim hasil ke aplikasi WA Scheduler.
-        val result = Intent(ACTION_RECIPIENT_SELECTED).apply {
-            setPackage(packageName)
-            putExtra(EXTRA_RECIPIENT_NAME, recipientName)
-            putExtra(EXTRA_WHATSAPP_PACKAGE, pkg)
-        }
-
-        sendBroadcast(result)
+        // Beritahu EditActivity jika sedang aktif.
+        sendBroadcast(
+            Intent("com.wascheduler.app.RECIPIENT_SELECTED").apply {
+                setPackage(packageName)
+                putExtra("recipient_name", name)
+                putExtra("whatsapp_package", pkg)
+            }
+        )
     }
 
-    /**
-     * Memastikan kolom penulisan pesan tersedia.
-     */
     private fun hasChatComposer(
         root: AccessibilityNodeInfo
     ): Boolean {
-        return findNode(root) {
-            val id = it.viewIdResourceName ?: ""
+        val composerIds = listOf(
+            "com.whatsapp:id/entry",
+            "com.whatsapp:id/chat_input",
+            "com.whatsapp.w4b:id/entry",
+            "com.whatsapp.w4b:id/chat_input"
+        )
 
-            id.endsWith(":id/entry") ||
-                id.endsWith(":id/chat_input") ||
-                id.endsWith(":id/conversation_entry")
-        } != null
+        for (id in composerIds) {
+            val nodes = root.findAccessibilityNodeInfosByViewId(id)
+            if (!nodes.isNullOrEmpty()) return true
+        }
+
+        return false
     }
 
-    /**
-     * Mengambil nama dari toolbar percakapan.
-     */
     private fun findConversationTitle(
         root: AccessibilityNodeInfo
     ): String? {
-
         val titleIds = listOf(
             "com.whatsapp:id/conversation_contact_name",
             "com.whatsapp:id/conversation_title",
@@ -158,28 +140,25 @@ class WaAccessibilityService : AccessibilityService() {
             val nodes = root.findAccessibilityNodeInfosByViewId(id)
 
             if (!nodes.isNullOrEmpty()) {
-                val value = nodes.firstNotNullOfOrNull {
-                    it.text?.toString()?.trim()
-                        ?.takeIf { name -> name.isNotBlank() }
+                for (node in nodes) {
+                    val value = node.text?.toString()?.trim()
+                    if (!value.isNullOrBlank()) return value
                 }
-
-                if (value != null) return value
             }
         }
 
-        // Cadangan: toolbar dengan ID title.
-        val title = findNode(root) {
+        // Cadangan jika versi WhatsApp menggunakan ID berbeda.
+        val titleNode = findNode(root) {
             val id = it.viewIdResourceName ?: ""
-
             id.endsWith(":id/title") &&
-                it.text?.toString()?.isNotBlank() == true
+                !it.text.isNullOrBlank()
         }
 
-        return title?.text?.toString()
+        return titleNode?.text?.toString()?.trim()
     }
 
     // =====================================================
-    // PENGIRIMAN PESAN OTOMATIS (KODE LAMA DIPERTAHANKAN)
+    // PENGIRIMAN PESAN LAMA
     // =====================================================
 
     fun step() {
@@ -189,7 +168,6 @@ class WaAccessibilityService : AccessibilityService() {
         if (root.packageName?.toString() != job.pkg) return
 
         val now = SystemClock.uptimeMillis()
-
         val send = findSend(root)
 
         if (send != null) {
@@ -204,7 +182,6 @@ class WaAccessibilityService : AccessibilityService() {
             return
         }
 
-        // Tombol kirim sudah ditekan dan sekarang hilang.
         if (job.clicks > 0) {
             if (now - job.lastClick > 3000) {
                 SendCoordinator.finish(true, "")
@@ -253,17 +230,14 @@ class WaAccessibilityService : AccessibilityService() {
         if (edit != null) {
             if (edit.text?.toString() != name) {
                 val args = Bundle()
-
                 args.putCharSequence(
                     AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
                     name
                 )
-
                 edit.performAction(
                     AccessibilityNodeInfo.ACTION_SET_TEXT,
                     args
                 )
-
                 job.typedAt = now
             }
             return
@@ -272,7 +246,6 @@ class WaAccessibilityService : AccessibilityService() {
         val search = findNode(root) {
             val d = it.contentDescription
                 ?.toString()?.trim()?.lowercase()
-
             d == "search" || d == "cari"
         }
 
@@ -282,22 +255,18 @@ class WaAccessibilityService : AccessibilityService() {
     private fun findSend(
         root: AccessibilityNodeInfo
     ): AccessibilityNodeInfo? {
-
         for (id in listOf(
             "com.whatsapp:id/send",
             "com.whatsapp.w4b:id/send"
         )) {
             val list = root.findAccessibilityNodeInfosByViewId(id)
-
             if (!list.isNullOrEmpty()) return list[0]
         }
 
         return findNode(root) {
             val d = it.contentDescription
                 ?.toString()?.trim()?.lowercase()
-
-            val t = it.text
-                ?.toString()?.trim()?.lowercase()
+            val t = it.text?.toString()?.trim()?.lowercase()
 
             d == "send" || d == "kirim" ||
                 ((t == "send" || t == "kirim") &&
@@ -310,14 +279,11 @@ class WaAccessibilityService : AccessibilityService() {
         n: AccessibilityNodeInfo?,
         match: (AccessibilityNodeInfo) -> Boolean
     ): AccessibilityNodeInfo? {
-
         if (n == null) return null
-
         if (match(n)) return n
 
         for (i in 0 until n.childCount) {
             val result = findNode(n.getChild(i), match)
-
             if (result != null) return result
         }
 
@@ -333,7 +299,6 @@ class WaAccessibilityService : AccessibilityService() {
                     AccessibilityNodeInfo.ACTION_CLICK
                 )
             }
-
             current = current.parent
         }
 
