@@ -66,6 +66,7 @@ class EditActivity : AppCompatActivity() {
     private var recipientSelected = false
     private var recipientName = ""
     private var recipientIdentifier = ""
+    private var recipientPackage = ""
 
     private lateinit var etName: EditText
     private lateinit var etTarget: EditText
@@ -113,7 +114,6 @@ class EditActivity : AppCompatActivity() {
         tvFiles = findViewById(R.id.tvFiles)
         tvRecipient = findViewById(R.id.tvRecipient)
 
-        // Checkbox hari
         dayLabels.forEach { label ->
             val cb = CheckBox(this).apply {
                 text = label
@@ -122,7 +122,6 @@ class EditActivity : AppCompatActivity() {
             llDays.addView(cb)
         }
 
-        // Spinner pengulangan
         spType.adapter = ArrayAdapter(
             this,
             android.R.layout.simple_spinner_dropdown_item,
@@ -143,7 +142,6 @@ class EditActivity : AppCompatActivity() {
                 override fun onNothingSelected(p: AdapterView<*>?) {}
             }
 
-        // Spinner WhatsApp
         spWhatsApp.adapter = ArrayAdapter(
             this,
             android.R.layout.simple_spinner_dropdown_item,
@@ -155,12 +153,10 @@ class EditActivity : AppCompatActivity() {
                 syncTargetHint()
             }
 
-        // Tombol pilih penerima
         btnPickRecipient.setOnClickListener {
             pickRecipientFromWhatsApp()
         }
 
-        // Bawaan: 10 menit dari sekarang
         cal.add(Calendar.MINUTE, 10)
 
         existing = intent.getStringExtra("id")?.let {
@@ -221,9 +217,8 @@ class EditActivity : AppCompatActivity() {
 
     private fun pickRecipientFromWhatsApp() {
 
-        // Tahap ini khusus WhatsApp Utama.
         if (
-            whatsappTargets[spWhatsApp.selectedItemPosition] !=
+            whatsappTargets.getOrNull(spWhatsApp.selectedItemPosition) !=
             Schedule.WHATSAPP_MAIN
         ) {
             toast("Pemilihan WhatsApp Clone belum diaktifkan")
@@ -252,7 +247,15 @@ class EditActivity : AppCompatActivity() {
         ).edit()
             .remove(WaAccessibilityService.KEY_PENDING_NAME)
             .remove(WaAccessibilityService.KEY_PENDING_PACKAGE)
+            .remove(WaAccessibilityService.KEY_PENDING_IDENTIFIER)
             .apply()
+
+        recipientSelected = false
+        recipientName = ""
+        recipientIdentifier = ""
+        recipientPackage = ""
+
+        tvRecipient.text = "Belum ada penerima dipilih"
 
         WaAccessibilityService.beginRecipientSelection()
 
@@ -264,7 +267,7 @@ class EditActivity : AppCompatActivity() {
 
             startActivity(launchIntent)
 
-            toast("Buka chat atau grup yang ingin dipilih")
+            toast("Buka daftar chat, lalu pilih percakapan")
         } catch (e: Exception) {
             WaAccessibilityService.cancelRecipientSelection()
             toast("Gagal membuka WhatsApp: ${e.message}")
@@ -273,6 +276,11 @@ class EditActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+
+        readPendingRecipient()
+    }
+
+    private fun readPendingRecipient() {
 
         val prefs = getSharedPreferences(
             WaAccessibilityService.PREFS,
@@ -284,24 +292,42 @@ class EditActivity : AppCompatActivity() {
             null
         )
 
-        if (!name.isNullOrBlank()) {
-            recipientName = name
-            recipientIdentifier = ""
-            recipientSelected = true
+        val identifier = prefs.getString(
+            WaAccessibilityService.KEY_PENDING_IDENTIFIER,
+            ""
+        ) ?: ""
 
-            tvRecipient.text = "Penerima terpilih: $name"
+        val pkg = prefs.getString(
+            WaAccessibilityService.KEY_PENDING_PACKAGE,
+            ""
+        ) ?: ""
 
-            // Untuk grup, nama dapat digunakan oleh mekanisme
-            // pencarian grup yang sudah ada.
-            if (rbGroup.isChecked) {
-                etTarget.setText(name)
-            }
+        if (name.isNullOrBlank()) return
 
-            prefs.edit()
-                .remove(WaAccessibilityService.KEY_PENDING_NAME)
-                .remove(WaAccessibilityService.KEY_PENDING_PACKAGE)
-                .apply()
+        recipientName = name.trim()
+        recipientIdentifier = identifier.trim()
+        recipientPackage = pkg.trim()
+        recipientSelected = true
+
+        tvRecipient.text = if (recipientIdentifier.isNotBlank()) {
+            "Penerima: $recipientName\nNomor: $recipientIdentifier"
+        } else {
+            "Penerima: $recipientName\nNomor belum tersedia"
         }
+
+        // Grup menggunakan nama untuk mekanisme pencarian lama.
+        if (rbGroup.isChecked) {
+            etTarget.setText(recipientName)
+        } else if (recipientIdentifier.isNotBlank()) {
+            etTarget.setText(recipientIdentifier)
+        }
+
+        // Hapus data pending setelah berhasil dibaca.
+        prefs.edit()
+            .remove(WaAccessibilityService.KEY_PENDING_NAME)
+            .remove(WaAccessibilityService.KEY_PENDING_PACKAGE)
+            .remove(WaAccessibilityService.KEY_PENDING_IDENTIFIER)
+            .apply()
     }
 
     // =====================================================
@@ -322,7 +348,11 @@ class EditActivity : AppCompatActivity() {
         recipientIdentifier = s.recipientIdentifier
 
         tvRecipient.text = if (recipientSelected) {
-            "Penerima terpilih: $recipientName"
+            if (recipientIdentifier.isNotBlank()) {
+                "Penerima: $recipientName\nNomor: $recipientIdentifier"
+            } else {
+                "Penerima: $recipientName"
+            }
         } else {
             "Belum ada penerima dipilih"
         }
@@ -491,7 +521,6 @@ class EditActivity : AppCompatActivity() {
             return
         }
 
-        // Nama kontak saja belum cukup untuk pengiriman otomatis.
         if (
             !rbGroup.isChecked &&
             target.count { it.isDigit() } < 8
@@ -542,7 +571,6 @@ class EditActivity : AppCompatActivity() {
             id = UUID.randomUUID().toString()
         )
 
-        // Hapus lampiran lama yang sudah tidak dipakai.
         s.attachments
             .filter { it !in attachments }
             .forEach { File(it).delete() }
