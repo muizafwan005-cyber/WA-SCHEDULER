@@ -1,3 +1,4 @@
+
 package com.wascheduler.app
 
 import org.json.JSONArray
@@ -18,7 +19,8 @@ data class Schedule(
     var dayOfMonth: Int = 1,
     var enabled: Boolean = true,
     var nextRun: Long = 0L,
-    var lastStatus: String = ""
+    var lastStatus: String = "",
+    var whatsappTarget: String = WHATSAPP_MAIN
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id)
@@ -36,6 +38,7 @@ data class Schedule(
         put("enabled", enabled)
         put("nextRun", nextRun)
         put("lastStatus", lastStatus)
+        put("whatsappTarget", whatsappTarget)
     }
 
     companion object {
@@ -44,14 +47,25 @@ data class Schedule(
         const val TYPE_WEEKLY = "weekly"
         const val TYPE_MONTHLY = "monthly"
 
+        const val WHATSAPP_MAIN = "main"
+        const val WHATSAPP_CLONE = "clone"
+
         fun fromJson(o: JSONObject): Schedule {
             val att = mutableListOf<String>()
             val aj = o.optJSONArray("attachments")
-            if (aj != null) for (i in 0 until aj.length()) att.add(aj.getString(i))
+            if (aj != null) {
+                for (i in 0 until aj.length()) {
+                    att.add(aj.getString(i))
+                }
+            }
 
             val days = mutableListOf<Int>()
             val dj = o.optJSONArray("daysOfWeek")
-            if (dj != null) for (i in 0 until dj.length()) days.add(dj.getInt(i))
+            if (dj != null) {
+                for (i in 0 until dj.length()) {
+                    days.add(dj.getInt(i))
+                }
+            }
 
             return Schedule(
                 id = o.getString("id"),
@@ -68,7 +82,14 @@ data class Schedule(
                 dayOfMonth = o.optInt("dayOfMonth", 1),
                 enabled = o.optBoolean("enabled", true),
                 nextRun = o.optLong("nextRun"),
-                lastStatus = o.optString("lastStatus")
+                lastStatus = o.optString("lastStatus"),
+                whatsappTarget = o.optString(
+                    "whatsappTarget",
+                    WHATSAPP_MAIN
+                ).let {
+                    if (it == WHATSAPP_CLONE) WHATSAPP_CLONE
+                    else WHATSAPP_MAIN
+                }
             )
         }
     }
