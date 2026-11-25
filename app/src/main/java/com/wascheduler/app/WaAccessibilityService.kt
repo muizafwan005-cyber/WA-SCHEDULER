@@ -41,6 +41,7 @@ class WaAccessibilityService : AccessibilityService() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var lastChooserClick = 0L
+    private var lastSearchBtnClick = 0L
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -69,16 +70,13 @@ class WaAccessibilityService : AccessibilityService() {
         if (event == null) return
         Log.d(TAG, "pkg=${event.packageName} class=${event.className}")
 
-        // 1. Tangani layar pemilih WhatsApp Xiaomi (XSpace) / Android Chooser
         if (handleChooser(event)) return
 
-        // 2. Mode tambah penerima dari WhatsApp
         if (selectingRecipient) {
             captureRecipient()
             return
         }
 
-        // 3. Mode kirim pesan terjadwal
         if (SendCoordinator.current != null) {
             step()
         }
@@ -121,19 +119,18 @@ class WaAccessibilityService : AccessibilityService() {
         collectNodes(root, all)
 
         var candidates = all.filter {
-            it.isVisibleToUser &&
+            hasVisibleBounds(it) &&
                 labelOf(it).equals(expected, ignoreCase = true) &&
-                it.className?.toString() != "android.widget.EditText"
+                !isEditableNode(it)
         }
         if (candidates.isEmpty()) {
             candidates = all.filter {
-                it.isVisibleToUser &&
+                hasVisibleBounds(it) &&
                     labelOf(it).startsWith("WhatsApp", ignoreCase = true) &&
-                    it.className?.toString() != "android.widget.EditText"
+                    !isEditableNode(it)
             }
         }
 
-        // Urutkan kiri-ke-kanan pada baris yang sama (kiri = Utama [0], kanan = Clone [1])
         val sorted = candidates
             .distinctBy {
                 val r = Rect()
@@ -169,7 +166,7 @@ class WaAccessibilityService : AccessibilityService() {
         if (!recipientSawChatList) return
 
         val title = findConversationTitle(root) ?: return
-        val name = title.trim()
+        val name = cleanName(title)
         if (name.isBlank() ||
             name.equals("WhatsApp", true) ||
             name.equals("WhatsApp Business", true)
@@ -192,7 +189,6 @@ class WaAccessibilityService : AccessibilityService() {
             putExtra("whatsapp_package", pkg)
         })
 
-        // Otomatis kembali ke EditActivity agar langsung masuk ke daftar penerima
         mainHandler.postDelayed({
             try {
                 val backIntent = Intent(this, EditActivity::class.java).apply {
@@ -208,7 +204,7 @@ class WaAccessibilityService : AccessibilityService() {
     }
 
     private fun extractPhoneNumberFromTitle(title: String): String {
-        val value = title.trim()
+        val value = cleanName(title)
         if (!Regex("""^\+?[0-9][0-9\s().-]{6,}[0-9]$""").matches(value)) return ""
         val digits = value.filter { it.isDigit() }
         return if (digits.length in 8..15) digits else ""
@@ -238,8 +234,8 @@ class WaAccessibilityService : AccessibilityService() {
             val nodes = root.findAccessibilityNodeInfosByViewId(id)
             if (!nodes.isNullOrEmpty()) {
                 for (node in nodes) {
-                    val v = node.text?.toString()?.trim()
-                    if (!v.isNullOrBlank()) return v
+                    val v = cleanName(node.text?.toString())
+                    if (v.isNotBlank()) return v
                 }
             }
         }
@@ -247,18 +243,17 @@ class WaAccessibilityService : AccessibilityService() {
             val id = it.viewIdResourceName ?: ""
             id.endsWith(":id/title") && !it.text.isNullOrBlank()
         }
-        return titleNode?.text?.toString()?.trim()
+        return cleanName(titleNode?.text?.toString()).takeIf { it.isNotBlank() }
     }
 
     // =====================================================
-    // PENGIRIMAN PESAN OTOMATIS
+    // PENGIRIMAN PESAN & LAMPIRAN OTOMATIS
     // =====================================================
     fun step() {
         val job = SendCoordinator.current ?: return
         val root = rootInActiveWindow ?: return
         val rootPkg = root.packageName?.toString().orEmpty()
 
-        // Jika layar chooser Xiaomi masih muncul saat ticker berjalan, klik dari sini juga
         if (rootPkg == "com.miui.securitycore" ||
             rootPkg == "com.android.intentresolver" ||
             rootPkg == "com.google.android.intentresolver"
@@ -274,10 +269,10 @@ class WaAccessibilityService : AccessibilityService() {
         if (rootPkg != job.pkg) return
         val now = SystemClock.uptimeMillis()
 
-        // 1. Jika tombol Kirim sudah muncul (baik di ContactPicker setelah memilih,
-        //    maupun di ruang chat / preview lampiran), tekan Kirim.
+        // 1. Jika tombol Kirim sudah muncul (baik tombol lanjut di "Kirim ke...",
+        //    tombol Kirim di preview lampiran, dialog konfirmasi, atau ruang chat), klik.
         val send = findSend(root)
-        if (send != null && send.isVisibleToUser) {
+        if (send != null && hasVisibleBounds(send)) {
             job.chosen = true
             if (now - job.lastClick > 1500) {
                 if (clickSmart(send, forceGesture = false)) {
@@ -289,15 +284,15 @@ class WaAccessibilityService : AccessibilityService() {
             return
         }
 
-        // 2. Jika sudah pernah klik Kirim dan tombol Kirim sudah hilang > 3 detik, berarti terkirim
+        // 2. Setelah klik Kirim terakhir dan tombol Kirim sudah hilang > 4 detik -> selesai
         if (job.clicks > 0) {
-            if (now - job.lastClick > 3000) {
+            if (now - job.lastClick > 4000) {
                 SendCoordinator.finish(true, "")
             }
             return
         }
 
-        // 3. Jika mode cari penerima (kontak tersimpan / grup) dan tombol Kirim belum ada
+        // 3. Pilih penerima di layar "Kirim ke..." / daftar kontak
         if (job.isGroup) {
             pickRecipientInList(root, job, now)
         }
@@ -308,20 +303,14 @@ class WaAccessibilityService : AccessibilityService() {
         job: SendCoordinator.Job,
         now: Long
     ) {
-        val name = job.target.trim()
+        val name = cleanName(job.target)
         if (name.isBlank()) return
 
         val all = mutableListOf<AccessibilityNodeInfo>()
         collectNodes(root, all)
 
-        // Cari kotak pencarian (bukan kotak ketik chat di bawah)
-        val searchEdit = all.firstOrNull {
-            val id = it.viewIdResourceName ?: ""
-            it.isVisibleToUser &&
-                it.className?.toString() == "android.widget.EditText" &&
-                !id.endsWith(":id/entry") &&
-                !id.endsWith(":id/chat_input")
-        }
+        // Cari kotak pencarian di bagian atas (support EditText & AutoCompleteTextView)
+        val searchEdit = all.firstOrNull { isSearchInput(it) }
 
         val minResultTop = if (searchEdit != null) {
             val r = Rect()
@@ -331,65 +320,76 @@ class WaAccessibilityService : AccessibilityService() {
             0
         }
 
-        // Jika kotak pencarian sudah terisi nama target, cari baris hasil DI BAWAH kotak pencarian
-        val alreadyTyped = searchEdit != null &&
-            searchEdit.text?.toString()?.trim().equals(name, ignoreCase = true)
+        val rowNameIds = setOf(
+            "com.whatsapp:id/contactpicker_row_name",
+            "com.whatsapp:id/conversations_row_contact_name",
+            "com.whatsapp:id/row_contact_name",
+            "com.whatsapp:id/name",
+            "com.whatsapp.w4b:id/contactpicker_row_name",
+            "com.whatsapp.w4b:id/conversations_row_contact_name",
+            "com.whatsapp.w4b:id/row_contact_name",
+            "com.whatsapp.w4b:id/name"
+        )
 
-        if (alreadyTyped || job.typedAt > 0) {
-            val rowIds = setOf(
-                "com.whatsapp:id/contactpicker_row_name",
-                "com.whatsapp:id/conversations_row_contact_name",
-                "com.whatsapp:id/row_contact_name",
-                "com.whatsapp.w4b:id/contactpicker_row_name",
-                "com.whatsapp.w4b:id/conversations_row_contact_name",
-                "com.whatsapp.w4b:id/row_contact_name"
-            )
+        val typedText = cleanName(searchEdit?.text?.toString())
+        val alreadyTyped = searchEdit != null && typedText.equals(name, ignoreCase = true)
 
-            // Prioritas 1: cocok persis berdasarkan ID baris kontak WhatsApp
-            var match = all.filter {
-                it.isVisibleToUser &&
-                    it.viewIdResourceName in rowIds &&
+        // Prioritas 1: Cek apakah nama target SUDAH terlihat di baris kontak (langsung klik)
+        var match = all.filter {
+            hasVisibleBounds(it) &&
+                !isEditableNode(it) &&
+                it.viewIdResourceName in rowNameIds &&
+                topOf(it) >= minResultTop &&
+                cleanName(it.text?.toString()).equals(name, ignoreCase = true)
+        }.minByOrNull { topOf(it) }
+
+        // Prioritas 2: Setelah mengetik, cek node teks mana pun di bawah kotak pencarian
+        if (match == null && (alreadyTyped || job.typedAt > 0)) {
+            match = all.filter {
+                hasVisibleBounds(it) &&
+                    !isEditableNode(it) &&
                     topOf(it) >= minResultTop &&
-                    it.text?.toString()?.trim().equals(name, ignoreCase = true)
+                    cleanName(it.text?.toString()).equals(name, ignoreCase = true)
             }.minByOrNull { topOf(it) }
-
-            // Prioritas 2: cocok persis di node mana pun di bawah kotak pencarian
-            if (match == null) {
-                match = all.filter {
-                    it.isVisibleToUser &&
-                        it.className?.toString() != "android.widget.EditText" &&
-                        topOf(it) >= minResultTop &&
-                        it.text?.toString()?.trim().equals(name, ignoreCase = true)
-                }.minByOrNull { topOf(it) }
-            }
-
-            // Prioritas 3 (setelah 2 detik): cocok sebagian (contains) di bawah kotak pencarian
-            if (match == null && job.typedAt > 0 && now - job.typedAt > 2000) {
-                match = all.filter {
-                    it.isVisibleToUser &&
-                        it.className?.toString() != "android.widget.EditText" &&
-                        topOf(it) >= minResultTop &&
-                        it.text?.toString()?.contains(name, ignoreCase = true) == true
-                }.minByOrNull { topOf(it) }
-            }
-
-            if (match != null) {
-                if (now - job.lastPickClick > 1500) {
-                    job.lastPickClick = now
-                    job.pickAttempts++
-                    // Percobaan ke-1 pakai klik standar; jika belum pindah layar,
-                    // percobaan ke-2 dst paksa pakai sentuhan layar (gesture)
-                    val useGesture = job.pickAttempts >= 2
-                    val ok = clickSmart(match, forceGesture = useGesture)
-                    Log.d(TAG, "Klik penerima '$name' attempt=${job.pickAttempts} gesture=$useGesture ok=$ok")
-                }
-                return
-            }
         }
 
-        // Ketik nama penerima ke kotak pencarian
+        // Prioritas 3 (setelah 1.8 detik): cocok sebagian (contains)
+        if (match == null && (alreadyTyped || (job.typedAt > 0 && now - job.typedAt > 1800))) {
+            match = all.filter {
+                hasVisibleBounds(it) &&
+                    !isEditableNode(it) &&
+                    it.viewIdResourceName in rowNameIds &&
+                    topOf(it) >= minResultTop &&
+                    cleanName(it.text?.toString()).contains(name, ignoreCase = true)
+            }.minByOrNull { topOf(it) }
+                ?: all.filter {
+                    hasVisibleBounds(it) &&
+                        !isEditableNode(it) &&
+                        topOf(it) >= minResultTop &&
+                        cleanName(it.text?.toString()).contains(name, ignoreCase = true)
+                }.minByOrNull { topOf(it) }
+        }
+
+        if (match != null) {
+            if (now - job.lastPickClick > 1400) {
+                job.lastPickClick = now
+                job.pickAttempts++
+                // Percobaan 1 pakai klik standar; percobaan 2+ paksa sentuhan layar tepat di nama
+                val useGesture = job.pickAttempts >= 2
+                val ok = clickSmart(match, forceGesture = useGesture)
+                Log.d(
+                    TAG,
+                    "Klik penerima '$name' id=${match.viewIdResourceName} " +
+                        "attempt=${job.pickAttempts} gesture=$useGesture ok=$ok"
+                )
+            }
+            return
+        }
+
+        // Jika kotak pencarian sudah terbuka, ketik nama target
         if (searchEdit != null) {
             if (!alreadyTyped) {
+                searchEdit.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
                 val args = Bundle().apply {
                     putCharSequence(
                         AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
@@ -398,37 +398,70 @@ class WaAccessibilityService : AccessibilityService() {
                 }
                 if (searchEdit.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
                     job.typedAt = now
-                    Log.d(TAG, "Ketik pencarian: $name")
+                    Log.d(TAG, "Ketik pencarian: '$name' di ${searchEdit.className}")
                 }
+            } else {
+                Log.d(TAG, "Sudah ketik '$name', menunggu hasil di bawah y=$minResultTop")
             }
             return
         }
 
-        // Klik tombol Cari (ikon kaca pembesar)
-        val searchBtn = all.firstOrNull {
-            val d = it.contentDescription?.toString()?.trim()?.lowercase()
-            val id = it.viewIdResourceName ?: ""
-            it.isVisibleToUser && (
-                d == "search" || d == "cari" || id.endsWith(":id/menuitem_search")
-            )
+        // Jika kotak pencarian belum terbuka, klik ikon Cari (kaca pembesar)
+        if (now - lastSearchBtnClick > 1500) {
+            val searchBtn = all.firstOrNull {
+                val d = it.contentDescription?.toString()?.trim()?.lowercase().orEmpty()
+                val id = it.viewIdResourceName.orEmpty().lowercase()
+                hasVisibleBounds(it) && topOf(it) < 500 && (
+                    d == "search" || d == "cari" ||
+                        d.startsWith("search") || d.startsWith("cari") ||
+                        id.endsWith(":id/menuitem_search") ||
+                        id.endsWith(":id/search_btn") ||
+                        id.endsWith(":id/search_icon") ||
+                        id.endsWith(":id/search_button")
+                )
+            }
+            if (searchBtn != null) {
+                lastSearchBtnClick = now
+                val ok = clickSmart(searchBtn, forceGesture = false)
+                Log.d(TAG, "Klik tombol Cari id=${searchBtn.viewIdResourceName} ok=$ok")
+            } else {
+                Log.d(TAG, "Tombol Cari & nama '$name' belum ditemukan di layar ini")
+            }
         }
-        if (searchBtn != null) {
-            clickSmart(searchBtn, forceGesture = false)
-        }
+    }
+
+    private fun isEditableNode(n: AccessibilityNodeInfo): Boolean {
+        val cls = n.className?.toString().orEmpty()
+        return n.isEditable ||
+            cls.contains("EditText", true) ||
+            cls.contains("AutoComplete", true)
+    }
+
+    private fun isSearchInput(n: AccessibilityNodeInfo): Boolean {
+        if (!isEditableNode(n) || !hasVisibleBounds(n)) return false
+        val id = n.viewIdResourceName.orEmpty().lowercase()
+        if (id.endsWith(":id/entry") ||
+            id.endsWith(":id/chat_input") ||
+            id.contains("caption")
+        ) return false
+        return id.contains("search") || topOf(n) < 500
     }
 
     private fun findSend(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
         for (id in listOf("com.whatsapp:id/send", "com.whatsapp.w4b:id/send")) {
             val list = root.findAccessibilityNodeInfosByViewId(id)
-            if (!list.isNullOrEmpty()) return list[0]
+            if (!list.isNullOrEmpty()) {
+                val visible = list.firstOrNull { hasVisibleBounds(it) }
+                if (visible != null) return visible
+            }
         }
         return findNode(root) {
             val d = it.contentDescription?.toString()?.trim()?.lowercase()
             val t = it.text?.toString()?.trim()?.lowercase()
-            it.isVisibleToUser && (
+            val cls = it.className?.toString().orEmpty()
+            hasVisibleBounds(it) && (
                 d == "send" || d == "kirim" ||
-                    ((t == "send" || t == "kirim") &&
-                        it.className?.toString()?.contains("Button") == true)
+                    ((t == "send" || t == "kirim") && cls.contains("Button", true))
             )
         }
     }
@@ -436,9 +469,23 @@ class WaAccessibilityService : AccessibilityService() {
     // =====================================================
     // HELPER NODE & KLIK
     // =====================================================
+    private fun cleanName(s: String?): String {
+        if (s.isNullOrBlank()) return ""
+        return s.replace(Regex("[\\u200B-\\u200F\\u202A-\\u202E\\uFEFF]"), "")
+            .replace('\u00A0', ' ')
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+
     private fun labelOf(n: AccessibilityNodeInfo): String =
-        n.text?.toString()?.trim()?.takeIf { it.isNotBlank() }
-            ?: n.contentDescription?.toString()?.trim().orEmpty()
+        cleanName(n.text?.toString()).takeIf { it.isNotBlank() }
+            ?: cleanName(n.contentDescription?.toString())
+
+    private fun hasVisibleBounds(n: AccessibilityNodeInfo): Boolean {
+        val r = Rect()
+        n.getBoundsInScreen(r)
+        return r.width() > 0 && r.height() > 0
+    }
 
     private fun topOf(n: AccessibilityNodeInfo): Int {
         val r = Rect()
@@ -472,7 +519,7 @@ class WaAccessibilityService : AccessibilityService() {
     }
 
     private fun clickSmart(n: AccessibilityNodeInfo, forceGesture: Boolean): Boolean {
-        if (n.className?.toString() == "android.widget.EditText") return false
+        if (isEditableNode(n)) return false
         if (forceGesture) return clickGesture(n)
         return clickAction(n) || clickGesture(n)
     }
