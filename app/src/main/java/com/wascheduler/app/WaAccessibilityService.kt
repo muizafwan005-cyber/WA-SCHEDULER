@@ -353,15 +353,23 @@ class WaAccessibilityService : AccessibilityService() {
                 val targetNode = candidates[0]
                 val rowNode = findClickableRow(targetNode, screenH)
 
-                val ok = if (job.pickAttempts % 2 == 1) {
-                    (rowNode?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) ||
-                        clickAction(targetNode) ||
-                        clickGesture(targetNode)
+                // Utamakan FOTO PROFIL di baris tersebut (lebih andal daripada teks nama),
+                // baru fallback ke klik baris / nama.
+                val avatar = findAvatarNode(targetNode, rowNode)
+                val avatarOk = if (job.pickAttempts % 2 == 1) {
+                    (avatar != null && clickGesture(avatar)) ||
+                        (avatar != null && clickAction(avatar)) ||
+                        clickAvatarArea(targetNode, rowNode)
                 } else {
-                    clickGesture(targetNode) ||
-                        (rowNode?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) ||
-                        clickAction(targetNode)
+                    (avatar != null && clickAction(avatar)) ||
+                        (avatar != null && clickGesture(avatar)) ||
+                        clickAvatarArea(targetNode, rowNode)
                 }
+                val ok = avatarOk ||
+                    (rowNode?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) ||
+                    clickAction(targetNode) ||
+                    clickGesture(targetNode)
+                Log.d(TAG, "Klik foto profil: avatar=${avatar?.viewIdResourceName} avatarOk=$avatarOk")
                 job.lastPickOk = ok
 
                 val r = Rect()
@@ -533,6 +541,50 @@ class WaAccessibilityService : AccessibilityService() {
         return null
     }
 
+    /** Cari foto profil (avatar) di dalam baris yang memuat nama kontak/grup. */
+    private fun findAvatarNode(
+        nameNode: AccessibilityNodeInfo,
+        row: AccessibilityNodeInfo?
+    ): AccessibilityNodeInfo? {
+        val container = row ?: nameNode.parent ?: return null
+        val nodes = mutableListOf<AccessibilityNodeInfo>()
+        collectNodes(container, nodes)
+        val nameRect = Rect()
+        nameNode.getBoundsInScreen(nameRect)
+
+        val byId = nodes.firstOrNull {
+            val id = it.viewIdResourceName.orEmpty().lowercase()
+            hasVisibleBounds(it) && !isEditableNode(it) && (
+                id.contains("photo") || id.contains("avatar") ||
+                    id.contains("picture") || id.contains("contact_icon")
+                )
+        }
+        if (byId != null) return byId
+
+        // Fallback: ImageView paling kiri yang posisinya di sebelah kiri nama
+        return nodes.filter {
+            val r = Rect()
+            it.getBoundsInScreen(r)
+            (it.className?.toString().orEmpty().contains("ImageView", true)) &&
+                hasVisibleBounds(it) && r.right <= nameRect.left + 8
+        }.minByOrNull { leftOf(it) }
+    }
+
+    /** Jika node avatar tidak terbaca: ketuk area di kiri nama (tempat foto profil berada). */
+    private fun clickAvatarArea(
+        nameNode: AccessibilityNodeInfo,
+        row: AccessibilityNodeInfo?
+    ): Boolean {
+        val nameRect = Rect()
+        nameNode.getBoundsInScreen(nameRect)
+        val rowRect = Rect()
+        (row ?: nameNode.parent)?.getBoundsInScreen(rowRect)
+        if (rowRect.isEmpty || nameRect.left <= rowRect.left + 20) return false
+        val x = (rowRect.left + nameRect.left) / 2
+        val y = nameRect.centerY()
+        return clickAt(x, y)
+    }
+
     private fun findClickableRow(n: AccessibilityNodeInfo, screenH: Int): AccessibilityNodeInfo? {
         var cur: AccessibilityNodeInfo? = n
         var depth = 0
@@ -665,8 +717,12 @@ class WaAccessibilityService : AccessibilityService() {
         val rect = Rect()
         n.getBoundsInScreen(rect)
         if (rect.isEmpty) return false
+        return clickAt(rect.centerX(), rect.centerY())
+    }
+
+    private fun clickAt(x: Int, y: Int): Boolean {
         val path = Path().apply {
-            moveTo(rect.centerX().toFloat(), rect.centerY().toFloat())
+            moveTo(x.toFloat(), y.toFloat())
         }
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, 120))
