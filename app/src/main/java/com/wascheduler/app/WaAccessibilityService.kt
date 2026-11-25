@@ -43,6 +43,7 @@ class WaAccessibilityService : AccessibilityService() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var lastChooserClick = 0L
     private var lastSearchBtnClick = 0L
+    private var lastStepAt = 0L
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -77,6 +78,11 @@ class WaAccessibilityService : AccessibilityService() {
         }
 
         if (SendCoordinator.current != null) {
+            // Event WhatsApp sangat sering (animasi daftar). Batasi agar main thread tidak penuh;
+            // ticker 800ms di SendCoordinator tetap menjamin step() terus berjalan.
+            val t = SystemClock.uptimeMillis()
+            if (t - lastStepAt < 300) return
+            lastStepAt = t
             step()
         }
     }
@@ -284,7 +290,7 @@ class WaAccessibilityService : AccessibilityService() {
 
         // 2. Setelah klik Kirim terakhir dan tombol Kirim sudah hilang > 4 detik -> selesai
         if (job.clicks > 0) {
-            if (now - job.lastClick > 4000) {
+            if (now - job.lastClick > job.settleMs) {
                 SendCoordinator.finish(true, "")
             }
             return
@@ -336,25 +342,27 @@ class WaAccessibilityService : AccessibilityService() {
         )
 
         if (candidates.isNotEmpty()) {
-            if (now - job.lastPickClick > 1300) {
+            // Setelah klik yang berhasil, beri WhatsApp waktu pindah layar (foto banyak = lebih lama).
+            // Klik ulang terlalu cepat bisa MEMBATALKAN pilihan (toggle) atau mengetuk layar yang salah.
+            val gap = if (job.lastPickOk) 3500L else 1000L
+            if (now - job.lastPickClick > gap) {
                 job.lastPickClick = now
                 job.pickAttempts++
 
-                // Ganti-ganti kandidat jika percobaan sebelumnya belum memindahkan layar
-                val targetNode = candidates[(job.pickAttempts - 1) % candidates.size]
+                // Selalu kandidat terbaik (nama persis, baris daftar). Jangan loncat ke nama lain.
+                val targetNode = candidates[0]
                 val rowNode = findClickableRow(targetNode, screenH)
 
                 val ok = if (job.pickAttempts % 2 == 1) {
-                    // Percobaan ganjil: klik baris lewat Accessibility Action, fallback ke gesture tepat di teks nama
                     (rowNode?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) ||
                         clickAction(targetNode) ||
                         clickGesture(targetNode)
                 } else {
-                    // Percobaan genap: sentuh layar tepat di teks nama, fallback ke klik baris
                     clickGesture(targetNode) ||
                         (rowNode?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) ||
                         clickAction(targetNode)
                 }
+                job.lastPickOk = ok
 
                 val r = Rect()
                 targetNode.getBoundsInScreen(r)
@@ -395,6 +403,21 @@ class WaAccessibilityService : AccessibilityService() {
                         labelOf(it).isNotBlank()
                 }.take(8).joinToString(" | ") { "${labelOf(it)}(${it.viewIdResourceName})" }
                 Log.d(TAG, "Menunggu hasil '$name' di bawah y=$minResultTop. Terlihat: $visibleTexts")
+
+                // Hasil pencarian tidak muncul (filter WA kadang tidak ter-refresh oleh SET_TEXT):
+                // kosongkan lalu ketik ulang, maksimal 3 kali.
+                if (job.typedAt > 0 && now - job.typedAt > 4000 && job.retypes < 3) {
+                    job.retypes++
+                    val clear = Bundle().apply {
+                        putCharSequence(
+                            AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                            ""
+                        )
+                    }
+                    searchEdit.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, clear)
+                    job.typedAt = 0L
+                    Log.d(TAG, "Ketik ulang pencarian (retry ${job.retypes})")
+                }
             }
             return
         }
@@ -451,11 +474,18 @@ class WaAccessibilityService : AccessibilityService() {
                 r.centerX() in 1 until screenW
         }
 
+        fun isExact(n: AccessibilityNodeInfo): Boolean {
+            val lbl = labelOf(n)
+            return lbl.isNotBlank() && (
+                lbl.equals(name, ignoreCase = true) ||
+                    (nameDigits.length >= 8 && lbl.filter { it.isDigit() } == nameDigits)
+                )
+        }
+
         fun matchScore(n: AccessibilityNodeInfo): Int {
             val lbl = labelOf(n)
             if (lbl.isBlank()) return 0
-            val exact = lbl.equals(name, ignoreCase = true) ||
-                (nameDigits.length >= 8 && lbl.filter { it.isDigit() } == nameDigits)
+            val exact = isExact(n)
             val partial = !exact && allowPartial && lbl.contains(name, ignoreCase = true)
             if (!exact && !partial) return 0
 
@@ -469,11 +499,17 @@ class WaAccessibilityService : AccessibilityService() {
             return score
         }
 
-        return all.mapNotNull { node ->
+        val scored = all.mapNotNull { node ->
             if (isEditableNode(node) || !inVisibleScreen(node)) return@mapNotNull null
             val score = matchScore(node)
             if (score <= 0) null else Pair(node, score)
         }
+        // Nama persis menang atas nama sebagian ("Reloxon 2" jangan sampai memilih "Reloxon 22"),
+        // dan baris daftar menang atas chip/label lain yang kebetulan bertuliskan nama sama.
+        val exactOnly = if (scored.any { isExact(it.first) }) scored.filter { isExact(it.first) } else scored
+        val rowOnly = if (exactOnly.any { isRowNameId(it.first) }) exactOnly.filter { isRowNameId(it.first) } else exactOnly
+
+        return rowOnly
             .sortedWith(compareByDescending<Pair<AccessibilityNodeInfo, Int>> { it.second }
                 .thenBy { topOf(it.first) })
             .map { it.first }
