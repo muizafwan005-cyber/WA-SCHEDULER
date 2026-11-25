@@ -1,3 +1,4 @@
+
 <?xml version="1.0" encoding="utf-8"?>
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
@@ -29,11 +30,36 @@
             android:layout_width="match_parent"
             android:layout_height="48dp" />
 
+        <!-- Pemilihan penerima langsung dari WhatsApp -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Penerima pesan"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/btnPickRecipient"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Pilih Penerima dari WhatsApp" />
+
+        <TextView
+            android:id="@+id/tvRecipient"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:padding="12dp"
+            android:text="Belum ada penerima dipilih"
+            android:textSize="14sp" />
+
+        <!-- Input lama dipertahankan sementara
+             agar EditActivity yang sekarang tetap kompatibel -->
         <RadioGroup
             android:id="@+id/rgTarget"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
+            android:layout_marginTop="8dp"
             android:orientation="horizontal">
 
             <RadioButton
@@ -55,7 +81,7 @@
             android:id="@+id/etTarget"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="Nomor tujuan, mis. 081234567890"
+            android:hint="Nomor tujuan atau nama grup"
             android:inputType="text" />
 
         <EditText
@@ -141,5 +167,6 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="20dp"
             android:text="Simpan jadwal" />
+
     </LinearLayout>
 </ScrollView>
