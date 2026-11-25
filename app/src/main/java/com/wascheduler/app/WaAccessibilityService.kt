@@ -12,6 +12,7 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 
 class WaAccessibilityService : AccessibilityService() {
 
@@ -68,8 +69,6 @@ class WaAccessibilityService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
-        Log.d(TAG, "pkg=${event.packageName} class=${event.className}")
-
         if (handleChooser(event)) return
 
         if (selectingRecipient) {
@@ -155,9 +154,8 @@ class WaAccessibilityService : AccessibilityService() {
     // =====================================================
     private fun captureRecipient() {
         if (!selectingRecipient) return
-        val root = rootInActiveWindow ?: return
+        val root = findAppRoot("com.whatsapp") ?: findAppRoot("com.whatsapp.w4b") ?: return
         val pkg = root.packageName?.toString() ?: return
-        if (pkg != "com.whatsapp" && pkg != "com.whatsapp.w4b") return
 
         if (!hasChatComposer(root)) {
             recipientSawChatList = true
@@ -251,12 +249,12 @@ class WaAccessibilityService : AccessibilityService() {
     // =====================================================
     fun step() {
         val job = SendCoordinator.current ?: return
-        val root = rootInActiveWindow ?: return
-        val rootPkg = root.packageName?.toString().orEmpty()
 
-        if (rootPkg == "com.miui.securitycore" ||
-            rootPkg == "com.android.intentresolver" ||
-            rootPkg == "com.google.android.intentresolver"
+        val activeRoot = rootInActiveWindow
+        val activePkg = activeRoot?.packageName?.toString().orEmpty()
+        if (activePkg == "com.miui.securitycore" ||
+            activePkg == "com.android.intentresolver" ||
+            activePkg == "com.google.android.intentresolver"
         ) {
             val now = SystemClock.uptimeMillis()
             if (now - lastChooserClick >= 1800) {
@@ -266,16 +264,16 @@ class WaAccessibilityService : AccessibilityService() {
             return
         }
 
-        if (rootPkg != job.pkg) return
+        // Ambil jendela WhatsApp meskipun keyboard sedang aktif di depan
+        val root = findAppRoot(job.pkg) ?: return
         val now = SystemClock.uptimeMillis()
 
-        // 1. Jika tombol Kirim sudah muncul (baik tombol lanjut di "Kirim ke...",
-        //    tombol Kirim di preview lampiran, dialog konfirmasi, atau ruang chat), klik.
+        // 1. Jika tombol Kirim muncul, klik
         val send = findSend(root)
         if (send != null && hasVisibleBounds(send)) {
             job.chosen = true
             if (now - job.lastClick > 1500) {
-                if (clickSmart(send, forceGesture = false)) {
+                if (clickSmart(send, preferGesture = false)) {
                     job.clicks++
                     job.lastClick = now
                     Log.d(TAG, "Klik Kirim ke-${job.clicks} untuk ${job.target}")
@@ -306,12 +304,15 @@ class WaAccessibilityService : AccessibilityService() {
         val name = cleanName(job.target)
         if (name.isBlank()) return
 
+        val dm = resources.displayMetrics
+        val screenW = dm.widthPixels
+        val screenH = dm.heightPixels
+
         val all = mutableListOf<AccessibilityNodeInfo>()
         collectNodes(root, all)
 
-        // Cari kotak pencarian di bagian atas (support EditText & AutoCompleteTextView)
+        // Cari kotak pencarian di bagian atas
         val searchEdit = all.firstOrNull { isSearchInput(it) }
-
         val minResultTop = if (searchEdit != null) {
             val r = Rect()
             searchEdit.getBoundsInScreen(r)
@@ -320,93 +321,85 @@ class WaAccessibilityService : AccessibilityService() {
             0
         }
 
-        val rowNameIds = setOf(
-            "com.whatsapp:id/contactpicker_row_name",
-            "com.whatsapp:id/conversations_row_contact_name",
-            "com.whatsapp:id/row_contact_name",
-            "com.whatsapp:id/name",
-            "com.whatsapp.w4b:id/contactpicker_row_name",
-            "com.whatsapp.w4b:id/conversations_row_contact_name",
-            "com.whatsapp.w4b:id/row_contact_name",
-            "com.whatsapp.w4b:id/name"
-        )
-
         val typedText = cleanName(searchEdit?.text?.toString())
         val alreadyTyped = searchEdit != null && typedText.equals(name, ignoreCase = true)
 
-        // Prioritas 1: Cek apakah nama target SUDAH terlihat di baris kontak (langsung klik)
-        var match = all.filter {
-            hasVisibleBounds(it) &&
-                !isEditableNode(it) &&
-                it.viewIdResourceName in rowNameIds &&
-                topOf(it) >= minResultTop &&
-                cleanName(it.text?.toString()).equals(name, ignoreCase = true)
-        }.minByOrNull { topOf(it) }
+        // Kumpulkan semua kandidat nama yang berada di bawah kotak pencarian & di dalam layar
+        val candidates = findContactCandidates(
+            all = all,
+            name = name,
+            minResultTop = minResultTop,
+            screenW = screenW,
+            screenH = screenH,
+            allowPartial = alreadyTyped || (job.typedAt > 0 && now - job.typedAt > 1500),
+            requireRowIdOnly = !(alreadyTyped || job.typedAt > 0)
+        )
 
-        // Prioritas 2: Setelah mengetik, cek node teks mana pun di bawah kotak pencarian
-        if (match == null && (alreadyTyped || job.typedAt > 0)) {
-            match = all.filter {
-                hasVisibleBounds(it) &&
-                    !isEditableNode(it) &&
-                    topOf(it) >= minResultTop &&
-                    cleanName(it.text?.toString()).equals(name, ignoreCase = true)
-            }.minByOrNull { topOf(it) }
-        }
-
-        // Prioritas 3 (setelah 1.8 detik): cocok sebagian (contains)
-        if (match == null && (alreadyTyped || (job.typedAt > 0 && now - job.typedAt > 1800))) {
-            match = all.filter {
-                hasVisibleBounds(it) &&
-                    !isEditableNode(it) &&
-                    it.viewIdResourceName in rowNameIds &&
-                    topOf(it) >= minResultTop &&
-                    cleanName(it.text?.toString()).contains(name, ignoreCase = true)
-            }.minByOrNull { topOf(it) }
-                ?: all.filter {
-                    hasVisibleBounds(it) &&
-                        !isEditableNode(it) &&
-                        topOf(it) >= minResultTop &&
-                        cleanName(it.text?.toString()).contains(name, ignoreCase = true)
-                }.minByOrNull { topOf(it) }
-        }
-
-        if (match != null) {
-            if (now - job.lastPickClick > 1400) {
+        if (candidates.isNotEmpty()) {
+            if (now - job.lastPickClick > 1300) {
                 job.lastPickClick = now
                 job.pickAttempts++
-                // Percobaan 1 pakai klik standar; percobaan 2+ paksa sentuhan layar tepat di nama
-                val useGesture = job.pickAttempts >= 2
-                val ok = clickSmart(match, forceGesture = useGesture)
+
+                // Ganti-ganti kandidat jika percobaan sebelumnya belum memindahkan layar
+                val targetNode = candidates[(job.pickAttempts - 1) % candidates.size]
+                val rowNode = findClickableRow(targetNode, screenH)
+
+                val ok = if (job.pickAttempts % 2 == 1) {
+                    // Percobaan ganjil: klik baris lewat Accessibility Action, fallback ke gesture tepat di teks nama
+                    (rowNode?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) ||
+                        clickAction(targetNode) ||
+                        clickGesture(targetNode)
+                } else {
+                    // Percobaan genap: sentuh layar tepat di teks nama, fallback ke klik baris
+                    clickGesture(targetNode) ||
+                        (rowNode?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) ||
+                        clickAction(targetNode)
+                }
+
+                val r = Rect()
+                targetNode.getBoundsInScreen(r)
                 Log.d(
                     TAG,
-                    "Klik penerima '$name' id=${match.viewIdResourceName} " +
-                        "attempt=${job.pickAttempts} gesture=$useGesture ok=$ok"
+                    "Klik penerima '$name' attempt=${job.pickAttempts} " +
+                        "cands=${candidates.size} id=${targetNode.viewIdResourceName} " +
+                        "vis=${targetNode.isVisibleToUser} rect=$r ok=$ok"
                 )
             }
             return
         }
 
-        // Jika kotak pencarian sudah terbuka, ketik nama target
+        // Jika kotak pencarian sudah terbuka, isi teks tanpa langsung memunculkan keyboard
         if (searchEdit != null) {
             if (!alreadyTyped) {
-                searchEdit.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
                 val args = Bundle().apply {
                     putCharSequence(
                         AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
                         name
                     )
                 }
-                if (searchEdit.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
+                var ok = searchEdit.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                if (!ok) {
+                    searchEdit.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                    ok = searchEdit.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                }
+                if (ok) {
                     job.typedAt = now
                     Log.d(TAG, "Ketik pencarian: '$name' di ${searchEdit.className}")
                 }
             } else {
-                Log.d(TAG, "Sudah ketik '$name', menunggu hasil di bawah y=$minResultTop")
+                // Log bantu jika nama sudah diketik tetapi belum ada kandidat yang cocok
+                val visibleTexts = all.filter {
+                    it.isVisibleToUser &&
+                        !isEditableNode(it) &&
+                        topOf(it) >= minResultTop &&
+                        labelOf(it).isNotBlank()
+                }.take(8).joinToString(" | ") { "${labelOf(it)}(${it.viewIdResourceName})" }
+                Log.d(TAG, "Menunggu hasil '$name' di bawah y=$minResultTop. Terlihat: $visibleTexts")
             }
             return
         }
 
-        // Jika kotak pencarian belum terbuka, klik ikon Cari (kaca pembesar)
+        // Jika kotak pencarian belum terbuka, klik ikon Cari
         if (now - lastSearchBtnClick > 1500) {
             val searchBtn = all.firstOrNull {
                 val d = it.contentDescription?.toString()?.trim()?.lowercase().orEmpty()
@@ -422,12 +415,103 @@ class WaAccessibilityService : AccessibilityService() {
             }
             if (searchBtn != null) {
                 lastSearchBtnClick = now
-                val ok = clickSmart(searchBtn, forceGesture = false)
+                val ok = clickSmart(searchBtn, preferGesture = false)
                 Log.d(TAG, "Klik tombol Cari id=${searchBtn.viewIdResourceName} ok=$ok")
-            } else {
-                Log.d(TAG, "Tombol Cari & nama '$name' belum ditemukan di layar ini")
             }
         }
+    }
+
+    private fun findContactCandidates(
+        all: List<AccessibilityNodeInfo>,
+        name: String,
+        minResultTop: Int,
+        screenW: Int,
+        screenH: Int,
+        allowPartial: Boolean,
+        requireRowIdOnly: Boolean
+    ): List<AccessibilityNodeInfo> {
+        val nameDigits = name.filter { it.isDigit() }
+
+        fun isRowNameId(n: AccessibilityNodeInfo): Boolean {
+            val id = n.viewIdResourceName.orEmpty().lowercase()
+            return id.endsWith(":id/contactpicker_row_name") ||
+                id.endsWith(":id/conversations_row_contact_name") ||
+                id.endsWith(":id/row_contact_name") ||
+                id.endsWith(":id/contactpicker_row_contact_name") ||
+                id.endsWith(":id/name")
+        }
+
+        fun inVisibleScreen(n: AccessibilityNodeInfo): Boolean {
+            val r = Rect()
+            n.getBoundsInScreen(r)
+            return r.width() > 0 &&
+                r.height() > 0 &&
+                r.top >= minResultTop - 4 &&
+                r.centerY() in 1 until screenH &&
+                r.centerX() in 1 until screenW
+        }
+
+        fun matchScore(n: AccessibilityNodeInfo): Int {
+            val lbl = labelOf(n)
+            if (lbl.isBlank()) return 0
+            val exact = lbl.equals(name, ignoreCase = true) ||
+                (nameDigits.length >= 8 && lbl.filter { it.isDigit() } == nameDigits)
+            val partial = !exact && allowPartial && lbl.contains(name, ignoreCase = true)
+            if (!exact && !partial) return 0
+
+            val isRowId = isRowNameId(n)
+            if (requireRowIdOnly && !isRowId) return 0
+
+            var score = if (exact) 100 else 40
+            if (n.isVisibleToUser) score += 50
+            if (isRowId) score += 30
+            if (findClickableRow(n, screenH) != null) score += 20
+            return score
+        }
+
+        return all.mapNotNull { node ->
+            if (isEditableNode(node) || !inVisibleScreen(node)) return@mapNotNull null
+            val score = matchScore(node)
+            if (score <= 0) null else Pair(node, score)
+        }
+            .sortedWith(compareByDescending<Pair<AccessibilityNodeInfo, Int>> { it.second }
+                .thenBy { topOf(it.first) })
+            .map { it.first }
+            .distinctBy {
+                val r = Rect()
+                it.getBoundsInScreen(r)
+                "${r.top / 30}_${r.left / 30}"
+            }
+    }
+
+    private fun findAppRoot(pkg: String): AccessibilityNodeInfo? {
+        val active = rootInActiveWindow
+        if (active != null && active.packageName?.toString() == pkg) return active
+        val winList = try { windows } catch (_: Exception) { null } ?: return null
+        for (w in winList) {
+            if (w.type == AccessibilityWindowInfo.TYPE_APPLICATION) {
+                val r = w.root
+                if (r != null && r.packageName?.toString() == pkg) return r
+            }
+        }
+        return null
+    }
+
+    private fun findClickableRow(n: AccessibilityNodeInfo, screenH: Int): AccessibilityNodeInfo? {
+        var cur: AccessibilityNodeInfo? = n
+        var depth = 0
+        while (cur != null && depth < 7) {
+            if (cur.isClickable && cur.isEnabled) {
+                val r = Rect()
+                cur.getBoundsInScreen(r)
+                if (r.height() in 30..(screenH * 2 / 5)) {
+                    return cur
+                }
+            }
+            cur = cur.parent
+            depth++
+        }
+        return null
     }
 
     private fun isEditableNode(n: AccessibilityNodeInfo): Boolean {
@@ -451,7 +535,8 @@ class WaAccessibilityService : AccessibilityService() {
         for (id in listOf("com.whatsapp:id/send", "com.whatsapp.w4b:id/send")) {
             val list = root.findAccessibilityNodeInfosByViewId(id)
             if (!list.isNullOrEmpty()) {
-                val visible = list.firstOrNull { hasVisibleBounds(it) }
+                val visible = list.firstOrNull { it.isVisibleToUser && hasVisibleBounds(it) }
+                    ?: list.firstOrNull { hasVisibleBounds(it) }
                 if (visible != null) return visible
             }
         }
@@ -459,7 +544,7 @@ class WaAccessibilityService : AccessibilityService() {
             val d = it.contentDescription?.toString()?.trim()?.lowercase()
             val t = it.text?.toString()?.trim()?.lowercase()
             val cls = it.className?.toString().orEmpty()
-            hasVisibleBounds(it) && (
+            it.isVisibleToUser && hasVisibleBounds(it) && (
                 d == "send" || d == "kirim" ||
                     ((t == "send" || t == "kirim") && cls.contains("Button", true))
             )
@@ -518,10 +603,13 @@ class WaAccessibilityService : AccessibilityService() {
         return null
     }
 
-    private fun clickSmart(n: AccessibilityNodeInfo, forceGesture: Boolean): Boolean {
+    private fun clickSmart(n: AccessibilityNodeInfo, preferGesture: Boolean): Boolean {
         if (isEditableNode(n)) return false
-        if (forceGesture) return clickGesture(n)
-        return clickAction(n) || clickGesture(n)
+        return if (preferGesture) {
+            clickGesture(n) || clickAction(n)
+        } else {
+            clickAction(n) || clickGesture(n)
+        }
     }
 
     private fun clickAction(n: AccessibilityNodeInfo): Boolean {
