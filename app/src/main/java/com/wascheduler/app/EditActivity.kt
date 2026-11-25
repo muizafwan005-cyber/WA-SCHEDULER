@@ -3,6 +3,7 @@ package com.wascheduler.app
 
 import android.app.DatePickerDialog
 import android.app.TimePickerDialog
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
@@ -62,6 +63,10 @@ class EditActivity : AppCompatActivity() {
 
     private var existing: Schedule? = null
 
+    private var recipientSelected = false
+    private var recipientName = ""
+    private var recipientIdentifier = ""
+
     private lateinit var etName: EditText
     private lateinit var etTarget: EditText
     private lateinit var etMessage: EditText
@@ -73,9 +78,11 @@ class EditActivity : AppCompatActivity() {
 
     private lateinit var btnDate: Button
     private lateinit var btnTime: Button
+    private lateinit var btnPickRecipient: Button
 
     private lateinit var llDays: LinearLayout
     private lateinit var tvFiles: TextView
+    private lateinit var tvRecipient: TextView
 
     private val picker =
         registerForActivityResult(
@@ -100,9 +107,11 @@ class EditActivity : AppCompatActivity() {
 
         btnDate = findViewById(R.id.btnDate)
         btnTime = findViewById(R.id.btnTime)
+        btnPickRecipient = findViewById(R.id.btnPickRecipient)
 
         llDays = findViewById(R.id.llDays)
         tvFiles = findViewById(R.id.tvFiles)
+        tvRecipient = findViewById(R.id.tvRecipient)
 
         // Checkbox hari
         dayLabels.forEach { label ->
@@ -122,7 +131,6 @@ class EditActivity : AppCompatActivity() {
 
         spType.onItemSelectedListener =
             object : AdapterView.OnItemSelectedListener {
-
                 override fun onItemSelected(
                     p: AdapterView<*>?,
                     v: View?,
@@ -146,6 +154,11 @@ class EditActivity : AppCompatActivity() {
             .setOnCheckedChangeListener { _, _ ->
                 syncTargetHint()
             }
+
+        // Tombol pilih penerima
+        btnPickRecipient.setOnClickListener {
+            pickRecipientFromWhatsApp()
+        }
 
         // Bawaan: 10 menit dari sekarang
         cal.add(Calendar.MINUTE, 10)
@@ -202,6 +215,99 @@ class EditActivity : AppCompatActivity() {
         }
     }
 
+    // =====================================================
+    // PILIH PENERIMA WHATSAPP
+    // =====================================================
+
+    private fun pickRecipientFromWhatsApp() {
+
+        // Tahap ini khusus WhatsApp Utama.
+        if (
+            whatsappTargets[spWhatsApp.selectedItemPosition] !=
+            Schedule.WHATSAPP_MAIN
+        ) {
+            toast("Pemilihan WhatsApp Clone belum diaktifkan")
+            return
+        }
+
+        if (WaAccessibilityService.instance == null) {
+            toast(
+                "Aktifkan Accessibility Service WA Scheduler terlebih dahulu"
+            )
+            return
+        }
+
+        val launchIntent =
+            packageManager.getLaunchIntentForPackage("com.whatsapp")
+
+        if (launchIntent == null) {
+            toast("WhatsApp Utama tidak ditemukan")
+            return
+        }
+
+        // Hapus hasil pemilihan sebelumnya.
+        getSharedPreferences(
+            WaAccessibilityService.PREFS,
+            MODE_PRIVATE
+        ).edit()
+            .remove(WaAccessibilityService.KEY_PENDING_NAME)
+            .remove(WaAccessibilityService.KEY_PENDING_PACKAGE)
+            .apply()
+
+        WaAccessibilityService.beginRecipientSelection()
+
+        try {
+            launchIntent.addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP
+            )
+
+            startActivity(launchIntent)
+
+            toast("Buka chat atau grup yang ingin dipilih")
+        } catch (e: Exception) {
+            WaAccessibilityService.cancelRecipientSelection()
+            toast("Gagal membuka WhatsApp: ${e.message}")
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+
+        val prefs = getSharedPreferences(
+            WaAccessibilityService.PREFS,
+            MODE_PRIVATE
+        )
+
+        val name = prefs.getString(
+            WaAccessibilityService.KEY_PENDING_NAME,
+            null
+        )
+
+        if (!name.isNullOrBlank()) {
+            recipientName = name
+            recipientIdentifier = ""
+            recipientSelected = true
+
+            tvRecipient.text = "Penerima terpilih: $name"
+
+            // Untuk grup, nama dapat digunakan oleh mekanisme
+            // pencarian grup yang sudah ada.
+            if (rbGroup.isChecked) {
+                etTarget.setText(name)
+            }
+
+            prefs.edit()
+                .remove(WaAccessibilityService.KEY_PENDING_NAME)
+                .remove(WaAccessibilityService.KEY_PENDING_PACKAGE)
+                .apply()
+        }
+    }
+
+    // =====================================================
+    // ISI FORM
+    // =====================================================
+
     private fun fill(s: Schedule) {
         etName.setText(s.name)
         etTarget.setText(s.target)
@@ -211,7 +317,16 @@ class EditActivity : AppCompatActivity() {
             rbGroup.isChecked = true
         }
 
-        // Pulihkan pilihan WhatsApp sebelumnya
+        recipientSelected = s.recipientSelected
+        recipientName = s.recipientName
+        recipientIdentifier = s.recipientIdentifier
+
+        tvRecipient.text = if (recipientSelected) {
+            "Penerima terpilih: $recipientName"
+        } else {
+            "Belum ada penerima dipilih"
+        }
+
         val whatsappIndex = whatsappTargets.indexOf(s.whatsappTarget)
             .coerceAtLeast(0)
 
@@ -260,6 +375,10 @@ class EditActivity : AppCompatActivity() {
             if (type == Schedule.TYPE_MONTHLY) View.VISIBLE else View.GONE
     }
 
+    // =====================================================
+    // TANGGAL DAN WAKTU
+    // =====================================================
+
     private fun refreshDateTime() {
         btnDate.text = "Tanggal: " +
             SimpleDateFormat(
@@ -273,6 +392,10 @@ class EditActivity : AppCompatActivity() {
                 Locale.US
             ).format(cal.time)
     }
+
+    // =====================================================
+    // LAMPIRAN
+    // =====================================================
 
     private fun refreshFiles() {
         tvFiles.text = if (attachments.isEmpty()) {
@@ -298,7 +421,6 @@ class EditActivity : AppCompatActivity() {
         return name.replace(Regex("[^\\w.\\-]+"), "_")
     }
 
-    /** Salin file ke penyimpanan aplikasi supaya tetap ada saat jadwal berjalan. */
     private fun copyFiles(uris: List<Uri>) {
         Toast.makeText(
             this,
@@ -330,7 +452,7 @@ class EditActivity : AppCompatActivity() {
                         added.add(out.absolutePath)
                     }
                 } catch (e: Exception) {
-                    // Lewati file yang gagal dibaca
+                    // Lewati file yang gagal dibaca.
                 }
             }
 
@@ -349,6 +471,10 @@ class EditActivity : AppCompatActivity() {
         ).show()
     }
 
+    // =====================================================
+    // SIMPAN JADWAL
+    // =====================================================
+
     private fun save() {
         val target = etTarget.text.toString().trim()
         val message = etMessage.text.toString().trim()
@@ -357,7 +483,7 @@ class EditActivity : AppCompatActivity() {
         if (target.isEmpty()) {
             toast(
                 if (rbGroup.isChecked) {
-                    "Isi nama grup"
+                    "Pilih grup atau isi nama grup"
                 } else {
                     "Isi nomor tujuan"
                 }
@@ -365,8 +491,18 @@ class EditActivity : AppCompatActivity() {
             return
         }
 
-        if (!rbGroup.isChecked && target.count { it.isDigit() } < 8) {
-            toast("Nomor tidak valid")
+        // Nama kontak saja belum cukup untuk pengiriman otomatis.
+        if (
+            !rbGroup.isChecked &&
+            target.count { it.isDigit() } < 8
+        ) {
+            toast(
+                if (recipientSelected) {
+                    "Nama kontak terdeteksi, tetapi nomor teleponnya belum tersedia. Masukkan nomor tujuan."
+                } else {
+                    "Nomor tidak valid"
+                }
+            )
             return
         }
 
@@ -406,7 +542,7 @@ class EditActivity : AppCompatActivity() {
             id = UUID.randomUUID().toString()
         )
 
-        // Hapus file lampiran lama yang sudah tidak dipakai
+        // Hapus lampiran lama yang sudah tidak dipakai.
         s.attachments
             .filter { it !in attachments }
             .forEach { File(it).delete() }
@@ -426,10 +562,13 @@ class EditActivity : AppCompatActivity() {
         s.daysOfWeek = days.toMutableList()
         s.dayOfMonth = if (dom in 1..31) dom else 1
 
-        // Simpan tujuan WhatsApp untuk jadwal ini
         s.whatsappTarget = whatsappTargets[
             spWhatsApp.selectedItemPosition
         ]
+
+        s.recipientSelected = recipientSelected
+        s.recipientName = recipientName
+        s.recipientIdentifier = recipientIdentifier
 
         s.lastStatus = ""
 
