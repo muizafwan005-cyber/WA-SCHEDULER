@@ -29,8 +29,11 @@ object SendCoordinator {
         val batchKey: String,
         val isGroup: Boolean,
         val target: String,
-        val pkg: String
+        val pkg: String,
+        val settleMs: Long = 4000L
     ) {
+        var lastPickOk = false
+        var retypes = 0
         var chosen = false
         var clicks = 0
         var lastClick = 0L
@@ -50,7 +53,18 @@ object SendCoordinator {
         private set
 
     private val timeout = Runnable {
-        finish(false, "Waktu habis, tombol kirim tidak ditemukan")
+        val j = current
+        val reason = when {
+            j == null -> "Waktu habis"
+            j.clicks > 0 -> "Waktu habis setelah menekan Kirim"
+            j.isGroup && j.typedAt == 0L && j.pickAttempts == 0 ->
+                "Waktu habis, kotak pencarian WhatsApp tidak ditemukan"
+            j.isGroup && j.pickAttempts == 0 ->
+                "Waktu habis, hasil pencarian '${j.target}' tidak muncul"
+            j.isGroup -> "Waktu habis, '${j.target}' sudah diklik tetapi layar tidak lanjut ke tombol Kirim"
+            else -> "Waktu habis, tombol kirim tidak ditemukan"
+        }
+        finish(false, reason)
     }
 
     private val ticker = object : Runnable {
@@ -125,7 +139,9 @@ object SendCoordinator {
             batchKey = item.batchKey,
             isGroup = isSearchMode,
             target = jobTarget,
-            pkg = pkg
+            pkg = pkg,
+            // Foto lebih banyak = WhatsApp butuh waktu lebih lama memproses sebelum tombol Kirim selesai
+            settleMs = (4000L + 1500L * s.attachments.size).coerceAtMost(15000L)
         )
 
         WaUtil.wakeScreen(ctx)
