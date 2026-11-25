@@ -1,5 +1,6 @@
 package com.wascheduler.app
 
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -39,7 +40,6 @@ object WaUtil {
     fun buildIntent(c: Context, s: Schedule, pkg: String): Intent {
         val files = s.attachments.map { File(it) }.filter { it.exists() }
         val intent: Intent
-
         if (files.isEmpty()) {
             intent = if (!s.isGroup) {
                 val url = "https://wa.me/${normalizeNumber(s.target)}?text=${Uri.encode(s.message)}"
@@ -68,12 +68,16 @@ object WaUtil {
                     putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
                 }
             }
+            // Wajib pasang ClipData agar semua URI terbaca stabil di Android 11+ & Xiaomi Dual Apps
+            val clip = ClipData.newUri(c.contentResolver, "attachments", uris[0])
+            for (i in 1 until uris.size) {
+                clip.addItem(ClipData.Item(uris[i]))
+            }
+            intent.clipData = clip
             if (s.message.isNotBlank()) intent.putExtra(Intent.EXTRA_TEXT, s.message)
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            // Untuk perorangan, langsung buka chat tanpa lewat daftar kontak
             if (!s.isGroup) intent.putExtra("jid", "${normalizeNumber(s.target)}@s.whatsapp.net")
         }
-
         intent.setPackage(pkg)
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
         return intent
