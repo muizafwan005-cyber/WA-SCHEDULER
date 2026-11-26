@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.widget.Toast
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -32,6 +33,9 @@ object SendCoordinator {
         val pkg: String,
         val settleMs: Long = 4000L
     ) {
+        var launchedAt = 0L
+        var relaunches = 0
+        var launch: (() -> Unit)? = null
         var chooserNote: String? = null
         var lastPickOk = false
         var retypes = 0
@@ -147,6 +151,11 @@ object SendCoordinator {
             settleMs = (4000L + 1500L * s.attachments.size).coerceAtMost(15000L)
         )
 
+        current?.let { j ->
+            j.launchedAt = SystemClock.uptimeMillis()
+            j.launch = { service.startActivity(WaUtil.buildIntent(ctx, singleSchedule, pkg)) }
+        }
+
         WaUtil.wakeScreen(ctx)
         try {
             service.startActivity(WaUtil.buildIntent(ctx, singleSchedule, pkg))
@@ -156,6 +165,17 @@ object SendCoordinator {
         }
         handler.postDelayed(timeout, TIMEOUT_MS)
         handler.postDelayed(ticker, 1500)
+    }
+
+    /** Buka ulang WhatsApp untuk job aktif (dipakai jika WA tidak muncul setelah dialog pilihan). */
+    fun relaunch() {
+        val j = current ?: return
+        j.relaunches++
+        j.launchedAt = SystemClock.uptimeMillis()
+        try {
+            j.launch?.invoke()
+        } catch (_: Exception) {
+        }
     }
 
     private fun clearBatch(batchKey: String) {
