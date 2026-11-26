@@ -180,7 +180,19 @@ class WaAccessibilityService : AccessibilityService() {
         val wantClone = targetWaIndex == 1
 
         val cloneLike = sorted.filter { looksClone(it) }
+
+        // Dari log HP ini: dialog 2 kolom. Kolom kanan = 'Aplikasi gandaWhatsApp' (Clone),
+        // kolom kiri = 'WhatsApp' (Utama). Urutan index lama keliru: index 1 = label Utama, bukan Clone.
+        val dualNode = all.firstOrNull {
+            hasVisibleBounds(it) && !isEditableNode(it) &&
+                labelOf(it).contains("ganda", ignoreCase = true) &&
+                labelOf(it).contains("WhatsApp", ignoreCase = true)
+        }
         val chosen: AccessibilityNodeInfo? = when {
+            dualNode != null && wantClone -> dualNode
+            dualNode != null ->
+                sorted.filter { leftOf(it) < leftOf(dualNode) - 100 }.minByOrNull { topOf(it) }
+                    ?: sorted.firstOrNull()
             cloneLike.isNotEmpty() && cloneLike.size < sorted.size ->
                 if (wantClone) cloneLike[0] else sorted.firstOrNull { !looksClone(it) }
             sorted.size > targetWaIndex -> sorted[targetWaIndex]
@@ -318,6 +330,13 @@ class WaAccessibilityService : AccessibilityService() {
         val root = findAppRoot(job.pkg)
         if (root == null) {
             diag("step: WhatsApp (${job.pkg}) belum di depan. activePkg=$activePkg target=${job.target}")
+            // WhatsApp tidak muncul 8 detik setelah dibuka (mis. klik dialog pilihan tidak meluncurkan WA):
+            // buka ulang, maksimal 2 kali.
+            val t = SystemClock.uptimeMillis()
+            if (job.launchedAt > 0 && t - job.launchedAt > 8000 && job.relaunches < 2) {
+                Log.d(TAG, "WhatsApp tidak muncul, buka ulang (${job.relaunches + 1}) untuk ${job.target}")
+                SendCoordinator.relaunch()
+            }
             return
         }
         val now = SystemClock.uptimeMillis()
