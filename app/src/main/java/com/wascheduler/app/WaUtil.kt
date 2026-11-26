@@ -79,7 +79,9 @@ object WaUtil {
             if (!s.isGroup) intent.putExtra("jid", "${normalizeNumber(s.target)}@s.whatsapp.net")
         }
         intent.setPackage(pkg)
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        // CLEAR_TASK: mulai WhatsApp dari task bersih. Dengan CLEAR_TOP, pada pengiriman ke penerima
+        // ke-2 dst. WhatsApp masih membawa layar chat penerima sebelumnya sehingga share baru bisa gagal.
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
         return intent
     }
 
