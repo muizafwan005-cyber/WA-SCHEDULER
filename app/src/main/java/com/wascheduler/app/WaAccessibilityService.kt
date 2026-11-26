@@ -80,6 +80,11 @@ class WaAccessibilityService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            SendCoordinator.current != null
+        ) {
+            Log.d(TAG, "Window: pkg=${event.packageName} cls=${event.className}")
+        }
         if (handleChooser(event)) return
 
         if (selectingRecipient) {
