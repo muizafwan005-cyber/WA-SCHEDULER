@@ -32,6 +32,7 @@ object SendCoordinator {
         val pkg: String,
         val settleMs: Long = 4000L
     ) {
+        var chooserNote: String? = null
         var lastPickOk = false
         var retypes = 0
         var chosen = false
@@ -57,6 +58,8 @@ object SendCoordinator {
         val reason = when {
             j == null -> "Waktu habis"
             j.clicks > 0 -> "Waktu habis setelah menekan Kirim"
+            j.chooserNote != null && j.typedAt == 0L && j.pickAttempts == 0 ->
+                "Waktu habis, ${j.chooserNote}"
             j.isGroup && j.typedAt == 0L && j.pickAttempts == 0 ->
                 "Waktu habis, kotak pencarian WhatsApp tidak ditemukan"
             j.isGroup && j.pickAttempts == 0 ->
